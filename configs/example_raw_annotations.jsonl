@@ -1,0 +1,2 @@
+{"image": "IMAGE_PATH_001", "width": 256, "height": 256, "label": "HSIL", "bbox": [120, 95, 220, 210]}
+{"image": "IMAGE_PATH_002", "width": 256, "height": 256, "label": "Normal", "bbox": [80, 70, 180, 190]}

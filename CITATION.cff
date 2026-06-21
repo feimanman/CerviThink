@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "CerviThink: A Reinforced Visual Reasoning Framework for Cervical Cancer Cell Classification"
+message: "If you use this software, please cite the accompanying paper."
+type: software
+authors:
+  - name: "CerviThink Contributors"
+year: 2026
+license: Apache-2.0

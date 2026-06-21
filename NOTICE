@@ -1,0 +1,9 @@
+CerviThink
+Copyright 2026 CerviThink Contributors
+
+This project includes training wrappers designed to interoperate with Ground-R1.
+Ground-R1 is distributed under the Apache License 2.0.
+
+This repository does not redistribute third-party model weights, medical images,
+or private clinical annotations. Users are responsible for complying with the
+licenses and data-use terms of the models and datasets they configure.

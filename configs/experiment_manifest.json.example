@@ -1,0 +1,32 @@
+[
+  {
+    "table": "dst_main",
+    "dataset": "DST",
+    "method": "Qwen2.5-VL-7B",
+    "metrics": "outputs/baselines/DST/Qwen2.5-VL-7B_metrics.json"
+  },
+  {
+    "table": "dst_main",
+    "dataset": "DST",
+    "method": "SFT",
+    "metrics": "outputs/reproduce/DST_sft_metrics.json"
+  },
+  {
+    "table": "dst_main",
+    "dataset": "DST",
+    "method": "CerviThink",
+    "metrics": "outputs/reproduce/DST_metrics.json"
+  },
+  {
+    "table": "multi_dataset",
+    "dataset": "ComparisonDetector",
+    "method": "CerviThink",
+    "metrics": "outputs/reproduce/ComparisonDetector_metrics.json"
+  },
+  {
+    "table": "multi_dataset",
+    "dataset": "HiCervix",
+    "method": "CerviThink",
+    "metrics": "outputs/reproduce/HiCervix_metrics.json"
+  }
+]
