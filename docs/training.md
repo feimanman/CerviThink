@@ -20,7 +20,7 @@ The GRPO script loads the Ground-R1 trainer from `GROUND_R1_OPEN_R1`.
 
 ```bash
 export GROUND_R1_OPEN_R1=/path/to/Ground-R1/r1-v/src/open_r1
-export MODEL_NAME_OR_PATH=outputs/sft/checkpoint
+export MODEL_NAME_OR_PATH=outputs/sft
 export DATASET_JSONL=outputs/cervicot.jsonl
 export OUTPUT_DIR=outputs/grpo
 
@@ -30,6 +30,10 @@ bash scripts/train_grpo.sh
 The GRPO script follows the paper setting `G1=4`, `G2=2`, so it launches
 `num_generations=8` and `num_generations_stage1=4`. It also sets `beta=0` to
 match the paper objective without a KL penalty.
+
+Keep `per_device_train_batch_size=1` for the GRPO adapter unless you have
+validated a custom Ground-R1 trainer path. The paper batch size is reached with
+multi-GPU training and/or gradient accumulation.
 
 The reward registry contains `accuracy`, `format`, `consistency`, `background`,
 and `dvhr`. By default, `scripts/train_cervithink_grpo.py` patches the
