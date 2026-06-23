@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -87,10 +88,9 @@ def build_prompt(record: dict, selected: list[dict]) -> str:
 
 def run_generator(command: str, prompt: str) -> str:
     completed = subprocess.run(
-        command,
+        shlex.split(command),
         input=prompt,
         text=True,
-        shell=True,
         check=True,
         capture_output=True,
     )

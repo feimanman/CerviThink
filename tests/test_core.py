@@ -1,5 +1,6 @@
 from pathlib import Path
 import random
+import sys
 import tempfile
 import unittest
 
@@ -21,6 +22,7 @@ from scripts.train_cervithink_grpo import (
     cervithink_background_reward,
     cervithink_consistency_reward,
 )
+from scripts.generate_cervicot_rationales import run_generator
 
 
 class CoreTest(unittest.TestCase):
@@ -191,6 +193,10 @@ class CoreTest(unittest.TestCase):
         config = CerviThinkConfig(grounding_rollouts=1, answer_rollouts=1)
         result = CerviThinkPipeline(VerboseModel(), config=config).run(image)
         self.assertEqual(result.prediction, "HSIL")
+
+    def test_rationale_generator_uses_argument_vector(self):
+        command = f"{sys.executable} -c \"import sys; print(sys.stdin.read().upper())\""
+        self.assertEqual(run_generator(command, "abc").strip(), "ABC")
 
 
 if __name__ == "__main__":
