@@ -31,8 +31,11 @@ class HFQwenVLModel:
         if attn_implementation:
             kwargs["attn_implementation"] = attn_implementation
 
-        self.processor = AutoProcessor.from_pretrained(model_name_or_path)
+        self.processor = AutoProcessor.from_pretrained(
+            model_name_or_path, min_pixels=3136, max_pixels=401408,
+        )
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+        self.model.eval()
 
     def generate(
         self,
@@ -41,7 +44,9 @@ class HFQwenVLModel:
         max_new_tokens: int = 256,
         temperature: float = 0.7,
     ) -> str:
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, add_vision_id=True,
+        )
         inputs = self.processor(
             text=[text],
             images=images,
@@ -53,6 +58,8 @@ class HFQwenVLModel:
             max_new_tokens=max_new_tokens,
             do_sample=temperature > 0,
             temperature=max(temperature, 1e-5),
+            top_k=0,
+            top_p=1.0,
         )
         trimmed = output_ids[:, inputs.input_ids.shape[1] :]
         return self.processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()

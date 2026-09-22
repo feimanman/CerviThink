@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0-alpha.1",
+  "python_package_version": "0.2.0a1",
+  "release_type": "alpha prerelease candidate",
+  "baseline_commit": "134a937e2c5ccaf25e9334975f33aa187c4b79f1",
+  "ground_r1_commit": "e10eae6890fd2c2be1aec1745c6b49b43ebc753e",
+  "scope": "method implementation and experiment workflow",
+  "validation": {
+    "synthetic_and_cpu_method_tests": true,
+    "real_7b_sft_grpo_tested": false,
+    "paper_metrics_reproduced": false,
+    "legacy_evaluator_repaired": false
+  },
+  "license": "Apache-2.0",
+  "license_official_text_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "known_limitations": "docs/known_limitations.md"
+}

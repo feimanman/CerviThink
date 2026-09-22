@@ -16,7 +16,8 @@ from .parsing import (
     has_cervithink_grounding_format,
     normalize_label,
 )
-from .prompts import answer_prompt, background_prompt, default_question, grounding_prompt
+from .prompts import background_prompt, crop_consistency_prompt, default_question, grounding_prompt
+from .protocol import answer_messages, answer_format, policy_box, trajectory_format
 from .rewards import RewardBreakdown, compute_dvhr
 from .visual_ops import VisualVariants, load_image, make_visual_variants
 
@@ -29,7 +30,7 @@ class CerviThinkConfig:
     transform_contrast: float | None = None
     focus_context_scale: float = 1.15
     max_new_tokens: int = 256
-    temperature: float = 0.7
+    temperature: float = 1.0
 
 
 @dataclass
@@ -48,6 +49,7 @@ class CerviThinkCandidate:
     answers: list[CerviThinkAnswer] = field(default_factory=list)
     reward: RewardBreakdown | None = None
     selection_score: float = 0.0
+    operation_parameters: dict = field(default_factory=dict)
 
     @property
     def best_answer(self) -> CerviThinkAnswer | None:
@@ -118,12 +120,18 @@ class CerviThinkPipeline:
             temperature=self.config.temperature,
         )
 
-    def _answer(self, images: list[Image.Image], question: str) -> str:
+    def _answer(self, images: list[Image.Image], question: str, grounding: str) -> str:
         return self.model.generate(
-            self._user_message(answer_prompt(question), image_count=len(images)),
-            images,
+            answer_messages(question, images[0].width, images[0].height, grounding),
+            [images[0], *images],
             max_new_tokens=self.config.max_new_tokens,
             temperature=self.config.temperature,
+        )
+
+    def _crop_answer(self, image: Image.Image, question: str) -> str:
+        return self.model.generate(
+            self._user_message(crop_consistency_prompt(question), 1), [image],
+            max_new_tokens=self.config.max_new_tokens, temperature=0.0,
         )
 
     def _background_answer(self, image: Image.Image) -> str:
@@ -162,7 +170,7 @@ class CerviThinkPipeline:
         background_label = self._label_from_completion(answer.background_answer)
 
         score = 0.0
-        if has_cervithink_answer_format(answer.final_answer):
+        if answer_format(answer.final_answer):
             score += 1.0
         if final_label:
             score += 2.0
@@ -207,7 +215,7 @@ class CerviThinkPipeline:
 
         for _ in range(self.config.grounding_rollouts):
             grounding = self._ground(img, question)
-            raw_box = extract_box(grounding)
+            raw_box = policy_box(grounding, img.width, img.height)
             candidate = CerviThinkCandidate(grounding=grounding, bbox=None)
             if raw_box is None:
                 result.candidates.append(candidate)
@@ -215,20 +223,22 @@ class CerviThinkPipeline:
 
             variants = self._variants(img, raw_box)
             candidate.bbox = variants.bbox
+            candidate.operation_parameters = {"zoom": variants.zoom, "contrast": variants.contrast}
             evidence_images = [img, variants.focus, variants.transform, variants.ignore]
 
             for _ in range(self.config.answer_rollouts):
                 answer = CerviThinkAnswer(
-                    final_answer=self._answer(evidence_images, question),
-                    crop_answer=self._answer([variants.focus], question),
+                    final_answer=self._answer(evidence_images, question, grounding),
+                    crop_answer=self._crop_answer(variants.focus, question),
                     background_answer=self._background_answer(variants.ignore),
                 )
                 if true_label is not None:
                     answer.reward = compute_dvhr(
-                        answer.final_answer,
+                        grounding + " " + answer.final_answer,
                         true_label,
                         crop_completion=answer.crop_answer,
                         background_completion=answer.background_answer,
+                        format_mode="full",
                     )
                 candidate.answers.append(answer)
 

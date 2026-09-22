@@ -19,6 +19,7 @@ from cervithink.data import (
     CerviSample,
     convert_records,
     group_representative_label,
+    make_train_test_split,
     normalize_record,
     read_jsonl,
     split_group_key,
@@ -42,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=None, help="Dataset name written to each row.")
     parser.add_argument("--to-cervicot", action="store_true", help="Write final CerviCoT/Ground-R1 records.")
     parser.add_argument("--keep-source-id", action="store_true", help="Keep source sample IDs in the output JSONL.")
+    parser.add_argument("--rationale-mode", choices=("none", "provided", "template"), default="provided")
     return parser.parse_args()
 
 
@@ -76,32 +78,10 @@ def split_pairs(
     test_ratio: float,
     seed: int,
 ) -> list[tuple[CerviSample, bool]]:
-    rng = random.Random(seed)
-    pair_groups: dict[str, list[tuple[CerviSample, bool]]] = {}
-    for index, pair in enumerate(pairs):
-        pair_groups.setdefault(split_group_key(pair[0], str(index)), []).append(pair)
-
-    grouped: dict[str, list[list[tuple[CerviSample, bool]]]] = {}
-    for group_pairs in pair_groups.values():
-        label = group_representative_label(sample for sample, _keep in group_pairs)
-        grouped.setdefault(label, []).append(group_pairs)
-
-    train: list[tuple[CerviSample, bool]] = []
-    test: list[tuple[CerviSample, bool]] = []
-    for label_groups in grouped.values():
-        label_groups = label_groups[:]
-        rng.shuffle(label_groups)
-        n_test = max(1, int(round(len(label_groups) * test_ratio))) if len(label_groups) > 1 else 0
-        for group_pairs in label_groups[:n_test]:
-            test.extend(group_pairs)
-        for group_pairs in label_groups[n_test:]:
-            train.extend(group_pairs)
-
-    train = [(replace(sample, split="train"), keep) for sample, keep in train]
-    test = [(replace(sample, split="test"), keep) for sample, keep in test]
-    rng.shuffle(train)
-    rng.shuffle(test)
-    return train + test
+    train, test = make_train_test_split([p[0] for p in pairs], test_ratio, seed)
+    keep_by_identity = {id(sample): keep for sample, keep in pairs}
+    return [(replace(s, split=split), keep_by_identity[id(s)])
+            for split, subset in (("train", train), ("test", test)) for s in subset]
 
 
 def make_resized_sample(
@@ -115,6 +95,7 @@ def make_resized_sample(
     keep_rationale: bool,
     keep_source_id: bool,
 ) -> dict[str, object]:
+    out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(sample.image).convert("RGB")
 
@@ -126,7 +107,15 @@ def make_resized_sample(
         if context_scale != 1.0:
             bbox = scale_bbox(bbox, image.width, image.height, context_scale)
         patch = focus_operation(image, bbox).resize((size, size), Image.Resampling.BICUBIC)
-        new_bbox = (0, 0, size, size)
+        # Keep the original target inside a padded crop, rather than labeling
+        # the entire padded view as the target.
+        crop_box = clamp_bbox(bbox, image.width, image.height, min_size=28)
+        x1, y1, x2, y2 = sample.bbox
+        cx1, cy1, cx2, cy2 = crop_box
+        new_bbox = clamp_bbox((
+            (x1-cx1)*size/(cx2-cx1), (y1-cy1)*size/(cy2-cy1),
+            (x2-cx1)*size/(cx2-cx1), (y2-cy1)*size/(cy2-cy1),
+        ), size, size)
 
     stem = safe_stem(f"sample_{index:06d}", f"sample_{index:06d}")
     out_path = out_dir / f"{index:06d}_{stem}.png"
@@ -187,6 +176,7 @@ def main() -> None:
             split_if_missing=args.split_if_missing,
             test_ratio=args.test_ratio,
             seed=args.seed,
+            rationale_mode=args.rationale_mode,
         )
     else:
         output_rows = prepared_rows

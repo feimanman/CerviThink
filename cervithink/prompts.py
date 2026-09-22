@@ -19,11 +19,11 @@ Use this exact format:
 
 
 ANSWER_PROMPT_TEMPLATE = """Question: {question}
-You are given the original cervical cytology image plus one or more manipulated evidence images.
+You are given four images in order: original, focused crop, transformed crop, and ignored/inpainted original.
 Classify the cell as one of: {labels}.
-Use the focused crop for morphology, the transformed crop for fine texture, and the ignored/inpainted image to verify whether the remaining background is normal.
+Use the focused crop for morphology and the transformed crop for texture. Treat the inpainted background as an auxiliary view, not independent proof of normality.
 Use this exact format:
-<think>step-by-step diagnostic reasoning</think> <answer>one label from the list</answer>"""
+<rethink>step-by-step diagnostic reasoning</rethink> <answer>one label from the list</answer>"""
 
 
 SFT_PROMPT_TEMPLATE = """Question: {question}
@@ -75,7 +75,14 @@ def crop_consistency_prompt(question: str) -> str:
     )
 
 
-def sft_prompt(question: str, width: int, height: int) -> str:
+def sft_prompt(question: str, width: int, height: int, rationale_mode: str = "provided") -> str:
+    if rationale_mode == "none":
+        return (
+            f"Question: {question}\nClassify the cervical cell as one of: {label_options()}.\n"
+            f"The image size is Width:{width}, Height:{height}.\n"
+            "Return only the region and label, without a diagnostic rationale:\n"
+            "<box>[x1,y1,x2,y2]</box> <answer>one label from the list</answer>"
+        )
     return SFT_PROMPT_TEMPLATE.format(
         question=question,
         width=width,

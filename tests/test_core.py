@@ -116,12 +116,12 @@ class CoreTest(unittest.TestCase):
     def test_pipeline_scores_all_rollouts(self):
         class PipelineStub:
             def generate(self, messages, images, max_new_tokens=256, temperature=0.7):
-                text = messages[0]["content"][-1]["text"]
+                text = messages[-1]["content"][-1]["text"]
                 if "Return exactly one region" in text:
                     return "<think>cell region</think> <box>[8,8,40,40]</box>"
                 if "remaining visible background" in text:
                     return "<think>background is clear</think> <answer>Normal</answer>"
-                return "<think>features support HSIL</think> <answer>HSIL</answer>"
+                return "<rethink>features support HSIL</rethink> <answer>HSIL</answer>"
 
         image = Image.new("RGB", (64, 64), (220, 220, 220))
         config = CerviThinkConfig(grounding_rollouts=2, answer_rollouts=2)
@@ -137,15 +137,15 @@ class CoreTest(unittest.TestCase):
                 self.answer_calls = 0
 
             def generate(self, messages, images, max_new_tokens=256, temperature=0.7):
-                text = messages[0]["content"][-1]["text"]
+                text = messages[-1]["content"][-1]["text"]
                 if "Return exactly one region" in text:
                     return "<think>cell region</think> <box>[8,8,40,40]</box>"
                 if "remaining visible background" in text:
                     return "<think>background is clear</think> <answer>Normal</answer>"
                 self.answer_calls += 1
                 if self.answer_calls == 1:
-                    return "<think>ambiguous</think> <answer>Normal</answer>"
-                return "<think>features support HSIL</think> <answer>HSIL</answer>"
+                    return "<rethink>ambiguous</rethink> <answer>Normal</answer>"
+                return "<rethink>features support HSIL</rethink> <answer>HSIL</answer>"
 
         image = Image.new("RGB", (64, 64), (220, 220, 220))
         config = CerviThinkConfig(grounding_rollouts=1, answer_rollouts=2)
@@ -160,7 +160,7 @@ class CoreTest(unittest.TestCase):
                 self.last_label = "LSIL"
 
             def generate(self, messages, images, max_new_tokens=256, temperature=0.7):
-                text = messages[0]["content"][-1]["text"]
+                text = messages[-1]["content"][-1]["text"]
                 if "Return exactly one region" in text:
                     return "<think>cell region</think> <box>[8,8,40,40]</box>"
                 if "remaining visible background" in text:
@@ -169,7 +169,7 @@ class CoreTest(unittest.TestCase):
                     return f"<think>crop agrees</think> <answer>{self.last_label}</answer>"
                 self.final_calls += 1
                 self.last_label = "ASC-US" if self.final_calls == 2 else "LSIL"
-                return f"<think>features support {self.last_label}</think> <answer>{self.last_label}</answer>"
+                return f"<rethink>features support {self.last_label}</rethink> <answer>{self.last_label}</answer>"
 
         image = Image.new("RGB", (64, 64), (220, 220, 220))
         config = CerviThinkConfig(grounding_rollouts=1, answer_rollouts=3)
@@ -179,13 +179,13 @@ class CoreTest(unittest.TestCase):
     def test_pipeline_prediction_normalizes_aliases(self):
         class VerboseModel:
             def generate(self, messages, images, max_new_tokens=256, temperature=0.7):
-                text = messages[0]["content"][-1]["text"]
+                text = messages[-1]["content"][-1]["text"]
                 if "Return exactly one region" in text:
                     return "<think>cell region</think> <box>[8,8,40,40]</box>"
                 if "remaining visible background" in text:
                     return "<think>background is clear</think> <answer>Normal</answer>"
                 return (
-                    "<think>features support high-grade disease</think> "
+                    "<rethink>features support high-grade disease</rethink> "
                     "<answer>high-grade squamous intraepithelial lesion</answer>"
                 )
 
@@ -195,7 +195,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(result.prediction, "HSIL")
 
     def test_rationale_generator_uses_argument_vector(self):
-        command = f"{sys.executable} -c \"import sys; print(sys.stdin.read().upper())\""
+        command = [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"]
         self.assertEqual(run_generator(command, "abc").strip(), "ABC")
 
 

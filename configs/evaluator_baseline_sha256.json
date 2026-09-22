@@ -1,0 +1,12 @@
+{
+  "baseline_commit": "134a937e2c5ccaf25e9334975f33aa187c4b79f1",
+  "normalization": "CRLF to LF",
+  "sha256": {
+    "cervithink/metrics.py": "c539d6ed3c2d724a3fef65514fca2bd7e7604079df62742aaa7d92f843daf0e5",
+    "cervithink/parsing.py": "ac2229819d3323da7cd89a542cd294473dd69715de7eb073aa83e347bf630c28",
+    "scripts/evaluate_predictions.py": "3da59b951a5b72b50b638b433ccba26ea1461d3f9e02ebdc93df255eff1d742e",
+    "scripts/evaluate_dataset.py": "3509530f5d944515c7984a402396f99480d2788303f3486da737ef006db04160",
+    "scripts/evaluate_hf_baseline.py": "9cb89128b221dd14b5c2a6115ffabce4c12b5d8db870b2de5065c04111dd5530",
+    "scripts/aggregate_experiment_tables.py": "e72d2e7b9c247559779f59fcfbeed93723ee19e49d5d2cdee660c5bc9aede1be"
+  }
+}

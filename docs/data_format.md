@@ -1,5 +1,10 @@
 # Data Format
 
+For the repaired method workflow, first use the strict grouping/split path in
+`docs/reproduction.md`. Conversion no longer silently invents rationales.
+`rationale_mode=none` omits think/rethink text and uses only box/answer targets;
+the full-format example below applies to records with provided/generated reasoning.
+
 Input annotations are JSONL files. Each line describes one cell image.
 
 Required fields:

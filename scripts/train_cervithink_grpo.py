@@ -24,6 +24,7 @@ from cervithink.parsing import (
 )
 from cervithink.prompts import GROUNDING_PROMPT_TEMPLATE, grounding_prompt, label_options
 from cervithink.groundr1_dvhr import install_cervithink_dvhr
+from cervithink.protocol import trajectory_format
 
 
 def _ground_r1_template() -> str:
@@ -73,18 +74,7 @@ def _optional_column(name: str, kwargs, length: int) -> list[str]:
 
 def _rollout_format_ok(completion) -> bool:
     stages = _completion_stages(completion)
-    if not stages:
-        return False
-    if len(stages) == 1:
-        text = stages[0]
-        return (
-            has_full_cervithink_format(text)
-            or has_cervithink_answer_format(text)
-            or has_cervithink_grounding_format(text)
-        )
-    return all(has_cervithink_grounding_format(text) for text in stages[:-1]) and (
-        has_full_cervithink_format(stages[-1]) or has_cervithink_answer_format(stages[-1])
-    )
+    return len(stages) == 2 and trajectory_format(stages[0], stages[1])
 
 
 def cervithink_accuracy_reward(completions, solution=None, label=None, **kwargs):
@@ -113,10 +103,7 @@ def cervithink_consistency_reward(completions, solution=None, label=None, **kwar
         if crop_answer:
             rewards.append(1.0 if answer_matches(crop_answer, target) else 0.0)
             continue
-        intermediate_answers = [
-            stage for stage in _completion_stages(completion)[:-1] if "<answer>" in stage.lower()
-        ]
-        rewards.append(1.0 if any(answer_matches(stage, target) for stage in intermediate_answers) else 0.0)
+        rewards.append(0.0)
     return rewards
 
 
@@ -153,6 +140,8 @@ class CerviThinkScriptArguments:
     enable_dvhr_auxiliary: bool = True
     dvhr_aux_batch_size: Optional[int] = 4
     dvhr_aux_do_sample: bool = False
+    clip_epsilon: float = .2
+    max_context_tokens: int = 8192
     ground_r1_open_r1: str = str(MI2026 / "Ground-R1" / "r1-v" / "src" / "open_r1")
 
 
@@ -161,6 +150,8 @@ def main() -> None:
     parser.add_argument("--ground-r1-open-r1", default=str(MI2026 / "Ground-R1" / "r1-v" / "src" / "open_r1"))
     bootstrap_args, remaining_args = parser.parse_known_args()
 
+    from cervithink.training_io import check_upstream_revision
+    check_upstream_revision(bootstrap_args.ground_r1_open_r1)
     sys.path.insert(0, bootstrap_args.ground_r1_open_r1)
     try:
         from datasets import Dataset, DatasetDict, load_dataset
@@ -181,11 +172,27 @@ def main() -> None:
 
     trl_parser = TrlParser((CerviThinkScriptArguments, GRPOConfig, ModelConfig))
     script_args, training_args, model_args = trl_parser.parse_args_and_config(args=remaining_args)
+    if not script_args.reward_funcs or len(set(script_args.reward_funcs)) != len(script_args.reward_funcs):
+        raise ValueError("Choose at least one reward, without duplicates")
+    if "dvhr" in script_args.reward_funcs and len(script_args.reward_funcs) > 1:
+        raise ValueError("Use dvhr alone OR its individual components to avoid double counting")
+    if any(name not in reward_registry for name in script_args.reward_funcs):
+        raise ValueError("Unknown reward component")
     needs_auxiliary = any(
         name in {"consistency", "background", "dvhr"} for name in script_args.reward_funcs
     )
-    if script_args.enable_dvhr_auxiliary and needs_auxiliary:
-        install_cervithink_dvhr(ground_trainer)
+    if needs_auxiliary and not script_args.enable_dvhr_auxiliary:
+        raise ValueError("Active visual rewards require auxiliary forward passes")
+    if script_args.dvhr_aux_do_sample:
+        raise ValueError("The shared auxiliary protocol uses greedy decoding")
+    if training_args.per_device_train_batch_size != 1:
+        raise ValueError("Set per_device_train_batch_size=1 for this adapter")
+    if int(script_args.num_generations_stage1) <= 0 or int(script_args.answer_rollouts) <= 0:
+        raise ValueError("G1 and G2 must be positive")
+    if not 0 < script_args.clip_epsilon < 1:
+        raise ValueError("clip_epsilon must be in (0,1)")
+    # Reward ablations never switch to the upstream crop-only algorithm.
+    install_cervithink_dvhr(ground_trainer)
     if training_args.num_generations % int(script_args.num_generations_stage1) != 0:
         raise SystemExit(
             "num_generations must be divisible by num_generations_stage1. "
@@ -204,9 +211,12 @@ def main() -> None:
         if "split" in ds.column_names:
             train_ds = ds.filter(lambda row: row.get("split", "train") == script_args.dataset_train_split)
             test_ds = ds.filter(lambda row: row.get("split", "train") == script_args.dataset_test_split)
-            dataset = DatasetDict({"train": train_ds, "test": test_ds})
+            dataset = DatasetDict({
+                script_args.dataset_train_split: train_ds,
+                script_args.dataset_test_split: test_ds,
+            })
         else:
-            dataset = DatasetDict({"train": ds})
+            raise ValueError("Training JSONL must contain a validated split column")
     else:
         dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
 
@@ -231,17 +241,26 @@ def main() -> None:
         }
 
     dataset = dataset.map(make_conversation_image)
-    eval_dataset = None
-    if training_args.eval_strategy != "no" and script_args.dataset_test_split in dataset:
-        eval_dataset = dataset[script_args.dataset_test_split]
+    if str(training_args.eval_strategy) not in {"no", "IntervalStrategy.NO"}:
+        raise ValueError("Use eval_strategy=no; never tune this trainer against the held-out test partition")
+    if not len(dataset[script_args.dataset_train_split]):
+        raise ValueError("Training partition is empty")
+
+    from cervithink.training_io import load_training_model, write_training_manifest
+    model, processor = load_training_model(
+        model_args.model_name_or_path, model_args.attn_implementation,
+        script_args.min_pixels, script_args.max_pixels,
+    )
+    training_args.model_init_kwargs = None
 
     trainer = Qwen2VLGRPOTrainer(
-        model=model_args.model_name_or_path,
+        model=model,
+        processing_class=processor,
         reward_funcs=reward_funcs,
         score_funcs=[],
         args=training_args,
         train_dataset=dataset[script_args.dataset_train_split],
-        eval_dataset=eval_dataset,
+        eval_dataset=None,
         peft_config=get_peft_config(model_args),
         attn_implementation=model_args.attn_implementation,
         max_pixels=script_args.max_pixels,
@@ -250,13 +269,28 @@ def main() -> None:
     )
     trainer.cervithink_aux_batch_size = int(script_args.dvhr_aux_batch_size or 4)
     trainer.cervithink_aux_do_sample = bool(script_args.dvhr_aux_do_sample)
+    trainer.cervithink_enable_auxiliary = script_args.enable_dvhr_auxiliary
+    trainer.cervithink_clip_epsilon = script_args.clip_epsilon
+    trainer.cervithink_max_context_tokens = script_args.max_context_tokens
+    # Restore the official template overwritten by the legacy trainer.
+    from transformers import AutoProcessor
+    processor.chat_template = AutoProcessor.from_pretrained(model_args.model_name_or_path).chat_template
+    if training_args.beta == 0:
+        trainer.ref_model = None
+    if trainer.is_world_process_zero():
+        write_training_manifest(training_args.output_dir, script_args, training_args, model_args,
+                                bootstrap_args.ground_r1_open_r1)
     trainer.train()
-    trainer.save_state(training_args.output_dir)
+    trainer.save_state()
     trainer.save_model(training_args.output_dir)
+    if trainer.is_world_process_zero():
+        processor.save_pretrained(training_args.output_dir)
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)
 
 
 if __name__ == "__main__":
+    sys.dont_write_bytecode = True
+    os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     main()

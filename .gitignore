@@ -25,3 +25,12 @@ outputs/
 *.safetensors
 
 .DS_Store
+
+# Local handoff records and private experiment material are not release files.
+METHOD_REPAIR_*.md
+private/
+data/
+datasets/
+*.zip
+*.tar.gz
+*.env

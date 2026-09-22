@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-if-missing", action="store_true", help="Create stratified train/test splits.")
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--rationale-mode", choices=("none", "provided", "template"), default="provided")
     return parser.parse_args()
 
 
@@ -33,6 +34,7 @@ def main() -> None:
         split_if_missing=args.split_if_missing,
         test_ratio=args.test_ratio,
         seed=args.seed,
+        rationale_mode=args.rationale_mode,
     )
     write_jsonl(converted, args.output)
     print(f"Wrote {len(converted)} records to {args.output}")

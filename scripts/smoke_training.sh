@@ -27,6 +27,11 @@ if [[ "${RUN_SFT_SMOKE:-1}" == "1" ]]; then
 fi
 
 if [[ "${RUN_GRPO_SMOKE:-1}" == "1" ]]; then
+  GRPO_SMOKE_MODEL="${GRPO_SMOKE_MODEL:-$MODEL_NAME_OR_PATH}"
+  if [[ "${RUN_SFT_SMOKE:-1}" == "1" ]]; then
+    GRPO_SMOKE_MODEL="$SMOKE_ROOT/sft"
+  fi
+  MODEL_NAME_OR_PATH="$GRPO_SMOKE_MODEL" \
   OUTPUT_DIR="$SMOKE_ROOT/grpo" \
   NPROC_PER_NODE="${NPROC_PER_NODE:-1}" \
   DVHR_AUX_BATCH_SIZE="${DVHR_AUX_BATCH_SIZE:-1}" \

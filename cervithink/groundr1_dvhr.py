@@ -1,498 +1,183 @@
-"""CerviThink DVHR adapter for the Ground-R1 GRPO trainer."""
+"""Fixed two-stage CerviThink rollout adapter for the pinned Ground-R1 trainer.
 
+Modified 2026-09-21: independent stage masks, original-image coordinates,
+shared visuals across G2 answers, and explicit old-policy log probabilities.
+Integration target: Ground-R1 e10eae6890fd2c2be1aec1745c6b49b43ebc753e.
+The underlying trainer originates from Ground-R1 / HuggingFace (Apache-2.0);
+this replacement implements the CerviThink-specific trajectory explicitly.
+"""
 from __future__ import annotations
 
 import copy
-import gc
-import re
-from typing import Any
 
-from PIL import Image
-
-from .parsing import extract_box
-from .prompts import answer_prompt, background_prompt, crop_consistency_prompt
-from .visual_ops import VisualVariants, make_visual_variants
+from .grpo_objective import joint_clipped_loss
+from .prompts import background_prompt, crop_consistency_prompt
+from .protocol import answer_messages, grounding_messages, policy_box, user_message
+from .visual_ops import load_image, make_visual_variants
 
 
 def install_cervithink_dvhr(ground_trainer) -> None:
-    """Patch Ground-R1's trainer to provide crop/background answers to rewards."""
-
+    """Install the SAME trajectory sampler for every reward ablation."""
     trainer_cls = ground_trainer.Qwen2VLGRPOTrainer
     if getattr(trainer_cls, "_cervithink_dvhr_installed", False):
         return
-
     torch = ground_trainer.torch
-    unwrap_model_for_generation = ground_trainer.unwrap_model_for_generation
-    is_conversational = ground_trainer.is_conversational
-    apply_chat_template = ground_trainer.apply_chat_template
-    process_vision_info = ground_trainer.process_vision_info
-    PreTrainedModel = ground_trainer.PreTrainedModel
 
-    def _prepare_with_trainer(self, inputs):
+    def encode(self, messages, images):
+        texts = [self.processing_class.apply_chat_template(
+            message, tokenize=False, add_generation_prompt=True, add_vision_id=True,
+        ) for message in messages]
+        inputs = self.processing_class(
+            text=texts, images=[image for group in images for image in group],
+            return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False,
+        )
+        context_limit = getattr(self, "cervithink_max_context_tokens", 8192)
+        if inputs["input_ids"].shape[1] + self.generation_config.max_new_tokens > context_limit:
+            raise ValueError("Multimodal context exceeds max_context_tokens; reduce image/token budget explicitly")
+        # Never truncate multimodal input IDs independently of image features.
         return super(trainer_cls, self)._prepare_inputs(inputs)
 
-    def _cervithink_aux_config(self):
+    def sample(self, model, messages, images, *, auxiliary=False):
+        encoded = encode(self, messages, images)
         config = copy.deepcopy(self.generation_config)
         config.num_return_sequences = 1
-        config.do_sample = bool(getattr(self, "cervithink_aux_do_sample", False))
-        return config
+        config.do_sample = not auxiliary
+        config.temperature = 1.0
+        config.top_k = 0
+        config.top_p = 1.0
+        generated = model.generate(**encoded, generation_config=config)
+        prompt_len = encoded["input_ids"].shape[1]
+        completion = generated[:, prompt_len:]
+        eos = self.processing_class.tokenizer.eos_token_id
+        eos_mask = completion == eos
+        # Include the first EOS; exclude every padding token after it.
+        after_eos = eos_mask.cumsum(dim=1) - eos_mask.to(torch.long)
+        mask = (after_eos == 0).to(encoded["attention_mask"].dtype)
+        batch = dict(encoded)
+        batch["input_ids"] = generated
+        batch["attention_mask"] = torch.cat([encoded["attention_mask"], mask], dim=1)
+        texts = self.processing_class.batch_decode(completion, skip_special_tokens=True)
+        return batch, mask, texts
 
-    def _cervithink_make_visual_variants(
-        self,
-        output_text: str,
-        origin_image: Image.Image,
-        input_width: int,
-        input_height: int,
-        width: int,
-        height: int,
-    ) -> VisualVariants | None:
-        bbox = extract_box(output_text)
-        if bbox is None:
-            return None
-        mapped = ground_trainer.bbox_adjust(
-            list(bbox),
-            input_width,
-            input_height,
-            width,
-            height,
-            min_size=28,
-        )
-        if not mapped:
-            return None
-        return make_visual_variants(origin_image, tuple(mapped))
-
-    def _cervithink_prepare_answer_stage(
-        self,
-        origin_prompt,
-        origin_problem: str,
-        combined_images: list[Image.Image],
-        grounding_text: str,
-        variants: VisualVariants,
-    ):
-        answer_entry = {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "image"},
-                {"type": "image"},
-                {"type": "image"},
-                {"type": "text", "text": answer_prompt(origin_problem)},
-            ],
-        }
-        origin_prompt.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": str(grounding_text)}],
-                },
-                answer_entry,
-            ]
-        )
-        combined_images.extend([combined_images[0], variants.focus, variants.transform, variants.ignore])
-        return origin_prompt, combined_images
-
-    def _cervithink_generate_auxiliary_answers(
-        self,
-        model,
-        images: list[Image.Image | None],
-        prompt_text: str,
-    ) -> list[str]:
-        answers = ["" for _ in images]
-        tasks = [(idx, image) for idx, image in enumerate(images) if image is not None]
-        if not tasks:
-            return answers
-
-        batch_size = int(getattr(self, "cervithink_aux_batch_size", 4))
-        generation_config = self._cervithink_aux_config()
-        for start in range(0, len(tasks), batch_size):
-            chunk = tasks[start : start + batch_size]
-            messages = [
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": prompt_text},
-                        ],
-                    }
-                ]
-                for _idx, _image in chunk
-            ]
-            texts = [
-                self.processing_class.apply_chat_template(
-                    message,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    add_vision_id=True,
-                )
-                for message in messages
-            ]
-            batch_images = [image for _idx, image in chunk]
-            aux_inputs = self.processing_class(
-                text=texts,
-                images=batch_images,
-                return_tensors="pt",
-                padding=True,
-                padding_side="left",
-                add_special_tokens=False,
-            )
-            aux_inputs = _prepare_with_trainer(self, aux_inputs)
-            outputs = model.generate(**aux_inputs, generation_config=generation_config)
-            generated = [
-                output_ids[len(input_ids) :]
-                for input_ids, output_ids in zip(aux_inputs.input_ids, outputs)
-            ]
-            decoded = self.processing_class.batch_decode(
-                generated,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )
-            for (idx, _image), text in zip(chunk, decoded):
-                answers[idx] = text
-        return answers
+    def logps(self, model, batch, mask):
+        # Keep the attention mask used at sampling, especially left padding.
+        logits = model(**batch).logits[:, :-1, :]
+        ids = batch["input_ids"][:, 1:]
+        # Row-wise FP32 log-softmax limits the extra peak vocabulary allocation.
+        # Slice away prompt positions before log-softmax: only generated tokens
+        # enter this stage's objective.
+        logits = logits[:, -mask.shape[1]:, :]
+        ids = ids[:, -mask.shape[1]:]
+        values = [row.float().log_softmax(-1).gather(1, tokens[:, None]).squeeze(1)
+                  for row, tokens in zip(logits, ids)]
+        return torch.stack(values)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
-            raise ValueError("The GRPOTrainer does not support returning outputs")
-
-        origin_problem = inputs[0]["problem"]
-        prompts = [x["prompt"] for x in inputs]
-        prompts_text = self.processing_class.apply_chat_template(
-            inputs[0]["prompt"],
-            tokenize=False,
-            add_generation_prompt=True,
-            add_vision_id=True,
-        )
-        if "image" in inputs[0]:
-            images = []
-            for cur_idx, cur_input in enumerate(inputs):
-                copy_input = copy.deepcopy(cur_input)
-                copy_input["prompt"][0]["content"][0]["image"] = inputs[cur_idx]["image"]
-                images.append(process_vision_info(copy_input["prompt"])[0])
-            images = images[0]
-
-        prompt_inputs = self.processing_class(
-            text=prompts_text,
-            images=images if "image" in inputs[0] else None,
-            videos=None,
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            add_special_tokens=False,
-        )
-        prompt_inputs = _prepare_with_trainer(self, prompt_inputs)
-        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-        input_height = prompt_inputs["image_grid_thw"][0][1] * 14
-        input_width = prompt_inputs["image_grid_thw"][0][2] * 14
-        width, height = images[0].size
-
-        if self.max_prompt_length is not None:
-            prompt_ids = prompt_ids[:, -self.max_prompt_length :]
-            prompt_mask = prompt_mask[:, -self.max_prompt_length :]
-
-        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-            num_generations = self.generation_config.num_return_sequences
-            temp_generation_config = copy.deepcopy(self.generation_config)
-            temp_generation_config.num_return_sequences = self.num_generations_stage1
-
-            all_completions = [None] * num_generations
-            crop_bbox_to_cal_iou_stage1: list[Any] = []
-            prompt_for_generation = [copy.deepcopy(inputs[0]["prompt"]) for _ in range(num_generations)]
-            all_images_final_list = [copy.deepcopy(images) for _ in range(num_generations)]
-            aux_focus_images: list[Image.Image | None] = [None] * num_generations
-            aux_background_images: list[Image.Image | None] = [None] * num_generations
-
-            with torch.no_grad():
-                completion_stage1 = unwrapped_model.generate(
-                    **prompt_inputs,
-                    generation_config=temp_generation_config,
-                )
-
-                input_length = prompt_inputs["input_ids"].shape[1]
-                generated_ids_list = [out_ids[input_length:] for out_ids in completion_stage1]
-                output_text_stage1_list = self.processing_class.batch_decode(
-                    generated_ids_list,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )
-
-                del generated_ids_list
-                gc.collect()
-                torch.cuda.empty_cache()
-
-                original_list = output_text_stage1_list
-                repeat_factor = num_generations // len(original_list)
-                output_text_stage1_list = (original_list * repeat_factor)[:num_generations]
-                completion_stage1 = list(completion_stage1)
-                completion_stage1 = (completion_stage1 * repeat_factor)[:num_generations]
-                iteration = 0
-
-                while self.accelerator.reduce(
-                    torch.tensor(
-                        any(item is None for item in all_completions),
-                        device=self.accelerator.device,
-                    ).int()
-                ).item() > 0:
-                    messages_stage2_list = []
-                    all_images_stage2_list = []
-                    for idx in range(len(output_text_stage1_list)):
-                        if all_completions[idx] is not None:
-                            continue
-                        output_text = output_text_stage1_list[idx]
-                        if "<answer>" in output_text or iteration == 4:
-                            all_completions[idx] = completion_stage1[idx].unsqueeze(0)
-                            continue
-
-                        variants = self._cervithink_make_visual_variants(
-                            output_text,
-                            images[0],
-                            input_width,
-                            input_height,
-                            width,
-                            height,
-                        )
-                        if variants is None:
-                            all_completions[idx] = completion_stage1[idx].unsqueeze(0)
-                            continue
-                        aux_focus_images[idx] = variants.focus
-                        aux_background_images[idx] = variants.ignore
-
-                        prompt_for_generation[idx], all_images_final_list[idx] = (
-                            self._cervithink_prepare_answer_stage(
-                                prompt_for_generation[idx],
-                                origin_problem,
-                                all_images_final_list[idx],
-                                output_text,
-                                variants,
-                            )
-                        )
-                        messages_stage2_list.append(prompt_for_generation[idx])
-                        all_images_stage2_list.extend(all_images_final_list[idx])
-
-                    if messages_stage2_list:
-                        prompt_stage2_inputs = self._generate_for_stage2_batch(
-                            prompt_for_generation,
-                            all_images_final_list,
-                        )
-                        temp_stage2_config = copy.deepcopy(temp_generation_config)
-                        temp_stage2_config.num_return_sequences = 1
-                        completion_stage1 = unwrapped_model.generate(
-                            **prompt_stage2_inputs,
-                            generation_config=temp_stage2_config,
-                        )
-
-                        generated_ids_trimmed = [
-                            out_ids[len(in_ids) :]
-                            for in_ids, out_ids in zip(
-                                prompt_stage2_inputs.input_ids,
-                                completion_stage1,
-                            )
-                        ]
-                        output_text_stage1_list = self.processing_class.batch_decode(
-                            generated_ids_trimmed,
-                            skip_special_tokens=True,
-                            clean_up_tokenization_spaces=False,
-                        )
+            raise ValueError("This rollout loss is training-only; use the inference entry for predictions")
+        if len(inputs) != 1:
+            raise ValueError("CerviThink currently requires per_device_train_batch_size=1")
+        original = load_image(inputs[0]["image"])
+        question = inputs[0]["problem"]
+        g1 = int(self.num_generations_stage1)
+        if g1 <= 0:
+            raise ValueError("G1 must be positive")
+        g2 = self.num_generations // g1
+        if g2 <= 0 or g1 * g2 != self.num_generations:
+            raise ValueError("Generation count must be a positive G1*G2")
+        include_aux = bool(getattr(self, "cervithink_enable_auxiliary", True))
+        was_training = model.training
+        model.eval()
+        try:
+            with ground_trainer.unwrap_model_for_generation(model, self.accelerator) as unwrapped:
+                with torch.no_grad():
+                    grounding_batch, grounding_mask, groundings = sample(
+                        self, unwrapped,
+                        [grounding_messages(question, original.width, original.height) for _ in range(g1)],
+                        [[original] for _ in range(g1)],
+                    )
+                    variants = []
+                    for text in groundings:
+                        box = policy_box(text, original.width, original.height)
+                        variants.append(make_visual_variants(original, box) if box else None)
+                    parent_indices = [i for i in range(g1) for _ in range(g2)]
+                    messages, views, focus_views, background_views = [], [], [], []
+                    for i in parent_indices:
+                        variant = variants[i]
+                        # Invalid actions get zero reward and zero answer loss mask.
+                        # Dummy calls keep distributed generation schedules aligned.
+                        focus = variant.focus if variant else original
+                        transformed = variant.transform if variant else original
+                        ignored = variant.ignore if variant else original
+                        messages.append(answer_messages(question, original.width, original.height, groundings[i]))
+                        views.append([original, original, focus, transformed, ignored])
+                        focus_views.append([focus])
+                        background_views.append([ignored])
+                    answer_batch, answer_mask, answers = sample(self, unwrapped, messages, views)
+                    valid = torch.tensor([variants[i] is not None for i in parent_indices],
+                                         device=answer_mask.device)
+                    answer_mask = answer_mask * valid[:, None]
+                    if include_aux:
+                        _, _, crops = sample(self, unwrapped,
+                            [user_message(crop_consistency_prompt(question), 1) for _ in parent_indices],
+                            focus_views, auxiliary=True)
+                        _, _, backgrounds = sample(self, unwrapped,
+                            [user_message(background_prompt(), 1) for _ in parent_indices],
+                            background_views, auxiliary=True)
                     else:
-                        warmup_config = copy.deepcopy(temp_generation_config)
-                        warmup_config.num_return_sequences = 1
-                        warmup_input = {
-                            "input_ids": torch.tensor(
-                                [[self.tokenizer.pad_token_id]],
-                                device=self.accelerator.device,
-                            ),
-                            "attention_mask": torch.tensor([[1]], device=self.accelerator.device),
-                        }
-                        _ = unwrapped_model.generate(**warmup_input, generation_config=warmup_config)
-                    iteration += 1
+                        crops = backgrounds = [""] * self.num_generations
+                    # Rollout-policy likelihood snapshots, reused below.
+                    old_grounding = logps(self, unwrapped, grounding_batch, grounding_mask).detach()
+                    old_answer = logps(self, unwrapped, answer_batch, answer_mask).detach()
+                    ref_grounding = ref_answer = None
+                    if self.beta:
+                        if self.ref_model is not None:
+                            ref_grounding = logps(self, self.ref_model, grounding_batch, grounding_mask)
+                            ref_answer = logps(self, self.ref_model, answer_batch, answer_mask)
+                        else:
+                            with unwrapped.disable_adapter():
+                                ref_grounding = logps(self, unwrapped, grounding_batch, grounding_mask)
+                                ref_answer = logps(self, unwrapped, answer_batch, answer_mask)
 
-                prompt_stage2_inputs = self._generate_for_stage2_batch(
-                    prompt_for_generation,
-                    all_images_final_list,
-                )
+            valid_list = valid.tolist()
+            completions = [[groundings[i], answer] if ok else [""]
+                           for i, answer, ok in zip(parent_indices, answers, valid_list)]
+            columns = {key: [value] * self.num_generations for key, value in inputs[0].items()
+                       if key not in {"prompt", "completion"}}
+            columns.update(
+                crop_answer=[text if ok else "" for text, ok in zip(crops, valid_list)],
+                background_answer=[text if ok else "" for text, ok in zip(backgrounds, valid_list)],
+            )
+            reward_columns = []
+            for reward in self.reward_funcs:
+                if isinstance(reward, ground_trainer.PreTrainedModel):
+                    raise ValueError("This adapter requires callable CerviThink rewards")
+                values = reward(prompts=[inputs[0]["prompt"]] * self.num_generations,
+                                completions=completions, **columns)
+                if len(values) != self.num_generations:
+                    raise ValueError("Reward function returned the wrong rollout count")
+                reward_columns.append(torch.tensor(values, device=answer_mask.device, dtype=torch.float32) * valid)
+            rewards_per_func = torch.stack(reward_columns, dim=1)
+            rewards = rewards_per_func.sum(1)
+            std = rewards.std(unbiased=False)
+            advantages = (rewards - rewards.mean()) / (std + 1e-4)
+            current_grounding = logps(self, model, grounding_batch, grounding_mask)
+            current_answer = logps(self, model, answer_batch, answer_mask)
+            loss = joint_clipped_loss(
+                current_grounding, old_grounding, grounding_mask,
+                current_answer, old_answer, answer_mask,
+                parent_indices, advantages, epsilon=self.cervithink_clip_epsilon,
+                beta=self.beta, ref_grounding=ref_grounding, ref_answer=ref_answer,
+            )
+            for i, reward in enumerate(self.reward_funcs):
+                self._metrics[f"rewards/{reward.__name__}"].append(rewards_per_func[:, i].mean().item())
+            self._metrics["reward"].append(rewards.mean().item())
+            self._metrics["reward_std"].append(std.item())
+            self._metrics["cervithink/valid_grounding"].append(valid.float().mean().item())
+            self._metrics["cervithink/auxiliary_enabled"].append(float(include_aux))
+            return loss
+        finally:
+            model.train(was_training)
 
-                crop_answers = self._cervithink_generate_auxiliary_answers(
-                    unwrapped_model,
-                    aux_focus_images,
-                    crop_consistency_prompt(origin_problem),
-                )
-                background_answers = self._cervithink_generate_auxiliary_answers(
-                    unwrapped_model,
-                    aux_background_images,
-                    background_prompt(),
-                )
-
-                del output_text_stage1_list, completion_stage1, prompt_for_generation, all_images_final_list
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            max_length = max(completion.size(1) for completion in all_completions)
-            padded_completions = []
-            indices_list = []
-
-            for completion in all_completions:
-                seq = completion[0]
-                start_pattern = torch.tensor([151644, 77091, 198], device=seq.device)
-                end_token = torch.tensor(151645, device=seq.device)
-                sample_indices = []
-                start_indices = (
-                    (seq.unfold(0, len(start_pattern), 1) == start_pattern)
-                    .all(dim=1)
-                    .nonzero(as_tuple=True)[0]
-                )
-                for start_index in start_indices:
-                    start_index = start_index.item() + len(start_pattern)
-                    end_indices = (seq[start_index:] == end_token).nonzero(as_tuple=True)[0]
-                    end_index = start_index + (
-                        end_indices[0].item() + 1 if end_indices.numel() > 0 else len(seq) - start_index
-                    )
-                    sample_indices.append(list(range(start_index, end_index)))
-                indices_list.append(sample_indices)
-
-                if completion.size(1) < max_length:
-                    padding = torch.full(
-                        (completion.size(0), max_length - completion.size(1)),
-                        self.processing_class.tokenizer.pad_token_id,
-                        dtype=completion.dtype,
-                        device=completion.device,
-                    )
-                    padded_completion = torch.cat([completion, padding], dim=1)
-                else:
-                    padded_completion = completion
-                padded_completions.append(padded_completion)
-
-            prompt_completion_ids = torch.cat(padded_completions, dim=0)
-
-        completion_ids = prompt_completion_ids[:]
-        device = self.accelerator.device
-        batch_size, seq_length = completion_ids.size()
-        completion_mask = torch.zeros((batch_size, seq_length), dtype=torch.int, device=device)
-        for i, indices in enumerate(indices_list):
-            for index_range in indices:
-                completion_mask[i, index_range] = 1
-
-        prompt_stage2_inputs.pop("input_ids")
-        prompt_stage2_inputs.pop("attention_mask")
-        per_token_logps = self._get_per_token_logps(model, prompt_completion_ids, **prompt_stage2_inputs)
-        completion_mask = completion_mask[:, 1:]
-
-        with torch.inference_mode():
-            if self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model,
-                    prompt_completion_ids,
-                    **prompt_stage2_inputs,
-                )
-            else:
-                with self.accelerator.unwrap_model(model).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(
-                        model,
-                        prompt_completion_ids,
-                        **prompt_stage2_inputs,
-                    )
-
-        x_clamped = torch.clamp(ref_per_token_logps - per_token_logps, min=-10, max=10)
-        per_token_kl = torch.exp(x_clamped) - x_clamped - 1
-
-        completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
-        if is_conversational(inputs[0]):
-            completions = [
-                re.findall(r"(?<=\nassistant\n)(.*?)(?=\nuser\n|\Z)", completion, re.S)
-                for completion in completions
-            ]
-
-        prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
-        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
-        for i, (reward_func, reward_processing_class) in enumerate(
-            zip(self.reward_funcs, self.reward_processing_classes)
-        ):
-            if isinstance(reward_func, PreTrainedModel):
-                if is_conversational(inputs[0]):
-                    messages = [{"messages": p + c} for p, c in zip(prompts, completions)]
-                    texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
-                else:
-                    texts = [p + c for p, c in zip(prompts, completions)]
-                reward_inputs = reward_processing_class(
-                    texts,
-                    return_tensors="pt",
-                    padding=True,
-                    padding_side="right",
-                    add_special_tokens=False,
-                )
-                reward_inputs = _prepare_with_trainer(self, reward_inputs)
-                with torch.inference_mode():
-                    rewards_per_func[:, i] = reward_func(**reward_inputs).logits[:, 0]
-            else:
-                reward_kwargs = {key: [] for key in inputs[0].keys() if key not in ["prompt", "completion"]}
-                for key in reward_kwargs:
-                    for example in inputs:
-                        reward_kwargs[key].extend([example[key]] * self.num_generations)
-                reward_kwargs["crop_answer"] = crop_answers
-                reward_kwargs["background_answer"] = background_answers
-                output_reward_func = reward_func(
-                    prompts=prompts,
-                    completions=completions,
-                    **reward_kwargs,
-                )
-                rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
-
-        scores_per_func = torch.zeros(len(prompts), len(self.score_funcs), device=device)
-        for i, (score_func, _score_processing_class) in enumerate(
-            zip(self.score_funcs, self.score_processing_classes)
-        ):
-            score_kwargs = {key: [] for key in inputs[0].keys() if key not in ["prompt", "completion"]}
-            for key in score_kwargs:
-                for example in inputs:
-                    score_kwargs[key].extend([example[key]] * self.num_generations)
-            score_kwargs["crop_answer"] = crop_answers
-            score_kwargs["background_answer"] = background_answers
-            output_score_func = score_func(prompts=prompts, completions=completions, **score_kwargs)
-            scores_per_func[:, i] = torch.tensor(output_score_func, dtype=torch.float32, device=device)
-
-        rewards = rewards_per_func.sum(dim=1)
-        mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
-        std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
-
-        mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
-        advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-
-        per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
-        per_token_loss = -(per_token_loss - self.beta * per_token_kl)
-        token_counts = completion_mask.sum(dim=1).clamp_min(1)
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / token_counts).mean()
-
-        completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
-        self._metrics["completion_length"].append(completion_length)
-        self._metrics["cervithink/crop_aux_coverage"].append(
-            sum(bool(answer) for answer in crop_answers) / max(1, len(crop_answers))
-        )
-        self._metrics["cervithink/background_aux_coverage"].append(
-            sum(bool(answer) for answer in background_answers) / max(1, len(background_answers))
-        )
-
-        reward_per_func = self.accelerator.gather_for_metrics(rewards_per_func).mean(0)
-        for i, reward_func in enumerate(self.reward_funcs):
-            if isinstance(reward_func, PreTrainedModel):
-                reward_func_name = reward_func.config._name_or_path.split("/")[-1]
-            else:
-                reward_func_name = reward_func.__name__
-            self._metrics[f"rewards/{reward_func_name}"].append(reward_per_func[i].item())
-
-        score_per_func = self.accelerator.gather_for_metrics(scores_per_func).mean(0)
-        for i, score_func in enumerate(self.score_funcs):
-            score_func_name = score_func.__name__
-            self._metrics[f"scores/{score_func_name}"].append(score_per_func[i].item())
-
-        self._metrics["reward"].append(self.accelerator.gather_for_metrics(rewards).mean().item())
-        self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item())
-        mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / token_counts).mean()
-        self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
-        return loss
-
-    trainer_cls._cervithink_aux_config = _cervithink_aux_config
-    trainer_cls._cervithink_make_visual_variants = _cervithink_make_visual_variants
-    trainer_cls._cervithink_prepare_answer_stage = _cervithink_prepare_answer_stage
-    trainer_cls._cervithink_generate_auxiliary_answers = _cervithink_generate_auxiliary_answers
     trainer_cls.compute_loss = compute_loss
     trainer_cls._cervithink_dvhr_installed = True
