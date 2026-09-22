@@ -1,0 +1,58 @@
+{
+  "output_root": "/path/to/private/new_method_run",
+  "base_model": "/path/to/Qwen2.5-VL-7B-Instruct",
+  "ground_r1_root": "/path/to/Ground-R1",
+  "seed": 42,
+  "nproc_per_node": 4,
+  "use_deepspeed": 1,
+  "knowledge": "/path/to/private/frozen_pubmed_knowledge.jsonl",
+  "rationale_generator": {
+    "argv": ["python3", "/path/to/actual_visual_generator.py"],
+    "model_id": "REPLACE_WITH_ACTUAL_MODEL_AND_VERSION"
+  },
+  "datasets": [
+    {
+      "name": "DST",
+      "annotations": "/path/to/private/dst_annotations_with_groups.jsonl",
+      "image_root": "/path/to/private/dst/images",
+      "group_key": "patient_id",
+      "create_split": false,
+      "train_fraction": 1.0
+    },
+    {
+      "name": "ComparisonDetector",
+      "annotations": "/path/to/private/comparison_original_splits.jsonl",
+      "image_root": "/path/to/private/comparison/images",
+      "group_key": "slide_id",
+      "create_split": false,
+      "label_mapping": "/path/to/private/comparison_actual_label_mapping.json",
+      "train_fraction": 0.1
+    },
+    {
+      "name": "HiCervix",
+      "annotations": "/path/to/private/hicervix_original_splits.jsonl",
+      "image_root": "/path/to/private/hicervix/images",
+      "group_key": "slide_id",
+      "create_split": false,
+      "label_mapping": "/path/to/private/hicervix_actual_label_mapping.json",
+      "resize_full_image": true,
+      "train_fraction": 0.1
+    }
+  ],
+  "experiments": [
+    {"name": "DST_full", "dataset": "DST", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format", "consistency", "background"]},
+    {"name": "DST_base_RL", "dataset": "DST", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format"]},
+    {"name": "DST_consistency", "dataset": "DST", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format", "consistency"]},
+    {"name": "DST_background", "dataset": "DST", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format", "background"]},
+    {"name": "DST_without_CoT", "dataset": "DST", "rationale_mode": "none",
+     "rewards": ["accuracy", "format", "consistency", "background"]},
+    {"name": "ComparisonDetector_full", "dataset": "ComparisonDetector", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format", "consistency", "background"]},
+    {"name": "HiCervix_full", "dataset": "HiCervix", "rationale_mode": "rag",
+     "rewards": ["accuracy", "format", "consistency", "background"]}
+  ]
+}

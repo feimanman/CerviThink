@@ -49,6 +49,7 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def write_jsonl(records: Iterable[dict[str, Any]], path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -107,8 +108,6 @@ def normalize_record(record: dict[str, Any], image_root: Optional[str | Path] = 
 
     bbox = _extract_bbox(record, width, height)
     rationale = str(_first_present(record, ("rationale", "cot", "thought"), ""))
-    if not rationale:
-        rationale = build_rule_based_rationale(label, bbox)
 
     question = str(_first_present(record, ("question", "problem"), default_question()))
     sample_id = str(_first_present(record, ("id", "sample_id", "problem_id"), ""))
@@ -131,14 +130,25 @@ def normalize_record(record: dict[str, Any], image_root: Optional[str | Path] = 
     )
 
 
-def sample_to_groundr1_record(sample: CerviSample, problem_id: int) -> dict[str, Any]:
+def sample_to_groundr1_record(
+    sample: CerviSample, problem_id: int, rationale_mode: str = "provided",
+) -> dict[str, Any]:
+    if rationale_mode not in {"none", "provided", "template"}:
+        raise ValueError("rationale_mode must be none, provided, or template")
+    rationale = sample.rationale
+    if rationale_mode == "none" or sample.split != "train":
+        rationale = ""
+    elif rationale_mode == "template":
+        rationale = build_rule_based_rationale(sample.label, sample.bbox)
+    elif not rationale.strip():
+        raise ValueError("Missing training rationale: supply one or explicitly choose none/template")
     x1, y1, x2, y2 = sample.bbox
     rethink = (
         "After focusing on the candidate cell, compare abnormal morphology with the "
         "surrounding background and keep the final label clinically specific."
     )
     solution = SFT_RESPONSE_TEMPLATE.format(
-        rationale=sample.rationale,
+        rationale=rationale,
         rethink=rethink,
         label=sample.label,
         x1=x1,
@@ -146,6 +156,8 @@ def sample_to_groundr1_record(sample: CerviSample, problem_id: int) -> dict[str,
         x2=x2,
         y2=y2,
     )
+    if not rationale:
+        solution = f"<box>[{x1},{y1},{x2},{y2}]</box> <answer>{sample.label}</answer>"
     return {
         "image": sample.image,
         "width": sample.width,
@@ -158,7 +170,8 @@ def sample_to_groundr1_record(sample: CerviSample, problem_id: int) -> dict[str,
         "problem": sample.question,
         "solution": solution,
         "label": sample.label,
-        "rationale": sample.rationale,
+        "rationale": rationale,
+        "rationale_mode": rationale_mode if sample.split == "train" else "none",
         "problem_id": sample.sample_id or problem_id,
     }
 
@@ -168,6 +181,8 @@ def make_train_test_split(
     test_ratio: float = 0.2,
     seed: int = 42,
 ) -> tuple[list[CerviSample], list[CerviSample]]:
+    if not 0 < test_ratio < 1:
+        raise ValueError("test_ratio must be strictly between 0 and 1")
     rng = random.Random(seed)
     sample_groups: dict[str, list[CerviSample]] = {}
     for index, sample in enumerate(samples):
@@ -182,7 +197,7 @@ def make_train_test_split(
     for label_groups in grouped.values():
         label_groups = label_groups[:]
         rng.shuffle(label_groups)
-        n_test = max(1, int(round(len(label_groups) * test_ratio))) if len(label_groups) > 1 else 0
+        n_test = min(len(label_groups) - 1, max(1, int(round(len(label_groups) * test_ratio)))) if len(label_groups) > 1 else 0
         for group_samples in label_groups[:n_test]:
             test.extend(group_samples)
         for group_samples in label_groups[n_test:]:
@@ -193,7 +208,9 @@ def make_train_test_split(
 
 
 def split_group_key(sample: CerviSample, fallback: str) -> str:
-    return sample.split_group or f"sample:{fallback}"
+    # Generic converter fallback only. Paper workflows require an explicit
+    # patient/WSI grouping column before any crop is written.
+    return sample.split_group or f"image:{sample.image or fallback}"
 
 
 def group_representative_label(samples: Iterable[CerviSample]) -> str:
@@ -206,6 +223,7 @@ def convert_records(
     split_if_missing: bool = False,
     test_ratio: float = 0.2,
     seed: int = 42,
+    rationale_mode: str = "provided",
 ) -> list[dict[str, Any]]:
     samples = [normalize_record(record, image_root=image_root) for record in records]
     if split_if_missing and all(sample.split == "train" for sample in samples):
@@ -215,4 +233,4 @@ def convert_records(
         ] + [
             CerviSample(**{**sample.__dict__, "split": "test"}) for sample in test
         ]
-    return [sample_to_groundr1_record(sample, idx + 1) for idx, sample in enumerate(samples)]
+    return [sample_to_groundr1_record(sample, idx + 1, rationale_mode) for idx, sample in enumerate(samples)]

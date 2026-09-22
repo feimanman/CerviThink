@@ -1,133 +1,38 @@
 #!/usr/bin/env python3
-"""Run basic checks before publishing the repository."""
-
-from __future__ import annotations
-
+"""Non-destructive alpha release checks; no real-model training is launched."""
 import argparse
+import json
 import os
-import re
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-
-SKIP_DIRS = {
-    ".git",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "outputs",
-    "wandb",
-    "runs",
-    "logs",
-    "checkpoints",
-    "build",
-    "dist",
-}
-
-TEXT_SUFFIXES = {
-    ".cff",
-    ".cfg",
-    ".env",
-    ".example",
-    ".in",
-    ".json",
-    ".jsonl",
-    ".md",
-    ".py",
-    ".sh",
-    ".toml",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
-
-def block_patterns() -> list[re.Pattern[str]]:
-    patterns = [
-        re.compile(r"\b" + "OPEN" + "AI_API_KEY" + r"\b"),
-        re.compile(r"\b" + "OPEN" + "ROUTER_API_KEY" + r"\b"),
-        re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-        re.compile(r"hf_[A-Za-z0-9]{20,}"),
-        re.compile(r"AKIA[0-9A-Z]{16}"),
-    ]
-    for value in {str(Path.home()), os.getenv("PWD", "")}:
-        if value and value != "/" and len(value) > 5:
-            patterns.append(re.compile(re.escape(value)))
-    return patterns
+from release_inventory import ROOT, check_inventory, release_files
 
 
-BLOCK_PATTERNS = block_patterns()
-
-
-def iter_text_files(root: Path):
-    for path in root.rglob("*"):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.is_file() and path.suffix in TEXT_SUFFIXES:
-            yield path
-
-
-def scan_tree() -> list[str]:
-    hits = []
-    for path in iter_text_files(ROOT):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            for pattern in BLOCK_PATTERNS:
-                if pattern.search(line):
-                    rel = path.relative_to(ROOT)
-                    hits.append(f"{rel}:{lineno}: {line.strip()}")
-    return hits
-
-
-def run(cmd: list[str]) -> int:
-    print("+", " ".join(cmd))
-    return subprocess.call(cmd, cwd=ROOT)
-
-
-def clean_pycache() -> None:
-    for path in ROOT.rglob("__pycache__"):
-        if path.is_dir():
-            for child in path.iterdir():
-                child.unlink()
-            path.rmdir()
-    for path in ROOT.rglob("*.pyc"):
-        path.unlink()
-
-
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-tests", action="store_true")
+    parser.add_argument("--report-dir", default=str(ROOT/"outputs/release_checks"))
     args = parser.parse_args()
-
-    hits = scan_tree()
-    if hits:
-        print("Sensitive or local-only strings found:")
-        for hit in hits:
-            print(hit)
+    issues = check_inventory()
+    if issues:
+        for issue in issues:
+            print(issue)
         return 1
-
+    manifest = json.loads((ROOT/"RELEASE_MANIFEST.json").read_text(encoding="utf-8"))
+    if manifest["validation"]["paper_metrics_reproduced"] or manifest["validation"]["real_7b_sft_grpo_tested"]:
+        raise ValueError("Do not promote validation flags without the corresponding evidence")
     if not args.skip_tests:
-        for script in sorted((ROOT / "scripts").glob("*.sh")):
-            rc = run(["bash", "-n", str(script)])
-            if rc != 0:
-                return rc
-        rc = run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
-        if rc != 0:
-            return rc
-        rc = run([sys.executable, "-m", "compileall", "cervithink", "scripts", "tests"])
-        if rc != 0:
-            return rc
-        clean_pycache()
-        rc = run([sys.executable, "scripts/open_source_check.py"])
-        if rc != 0:
-            return rc
-
-    print("release_check: ok")
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run([
+            sys.executable, "-B", str(ROOT/"scripts/check_method_repair.py"),
+            "--output-dir", str(Path(args.report_dir).resolve()),
+        ], cwd=ROOT, env=env)
+        if result.returncode:
+            return result.returncode
+    print(f"release_check: selected {len(release_files())} source files passed")
+    print("Scope: alpha method-code candidate; GPU training and paper metrics remain unverified.")
     return 0
 
 

@@ -1,207 +1,56 @@
-# CerviThink
+# CerviThink - v0.2.0-alpha.1
 
-Code for cervical cytology classification with grounded visual reasoning.
+This alpha prerelease contains repairs to the method implementation and experiment workflow
+from public commit `134a937`. It is **not a verified reproduction of the paper's
+reported scores**. The original evaluator is intentionally unchanged and still
+has the invalid-prediction filtering defect documented in the audit.
 
-The project contains data conversion, visual operations, reward calculation,
-rollout inference, and training wrappers for Qwen2.5-VL. The SFT and GRPO
-scripts reuse the training stack from Ground-R1.
+Do not use the legacy evaluator's numbers as validated results from this branch.
+This release does not change or revalidate paper/poster results. See
+`RELEASE_NOTES.md` and `docs/known_limitations.md` for the validation boundary.
 
-> This repository is for research use only and is not intended for clinical
-> diagnosis or treatment decisions.
+## Start here
 
-## Install
-
-For data preparation and local tests:
+- Release scope and limitations: `RELEASE_NOTES.md`
+- Explicit experiment workflow: `docs/reproduction.md`
+- Actual training objective and stage protocol: `docs/training.md`
+- Dataset/group/label requirements: `docs/datasets.md`
 
 ```bash
-cd CerviThink
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e .
+python -B scripts/check_method_repair.py
+python scripts/run_experiments.py --config configs/method_experiments.json.example
 ```
 
-If `python3 -m venv` is unavailable, install the system `python3-venv` package
-or use a managed environment such as Conda. For a non-editable user install,
-run `python3 -m pip install --user .`.
+The last command prints a plan; it does not launch training. Replace all private
+paths and provide actual data, grouping, label maps, and generator versions in a
+private copy of the configuration before using `--execute`.
 
-For SFT/GRPO training, install the Ground-R1 training environment before
-running the training scripts:
+## Scope
+
+- Original test membership is preserved; few-shot selection is inside train.
+- Group/WSI overlaps and missing grouping data are rejected by the experiment path.
+- Reward ablations share one SFT activation checkpoint, prompts, images, and
+  rollout sampler; by default they retain auxiliary forward passes too.
+- CoT modes are explicit: `none`, `provided`, `rag`, and `template`.
+- Grounding and answering receive a joint clipped policy-gradient loss with
+  explicit old-policy likelihoods. The current implementation uses one on-policy
+  update per sampled batch (mu=1); it does not implement multi-epoch PPO reuse.
+- The input-image coordinate system, main-answer history, and crop auxiliary
+  prompt are shared between training and inference.
+- A prediction-only entry is available without calling the legacy evaluator:
 
 ```bash
-cd /path/to/Ground-R1/r1-v
-python -m pip install -e .
-
-cd /path/to/CerviThink
-python -m pip install -e .
+python scripts/predict_method.py --model /path/to/checkpoint \
+  --input /path/to/cervicot.jsonl --output /path/to/new_predictions.jsonl --seed 42
 ```
 
-## Data Format
+## Outstanding validation
 
-Input annotations are JSONL files with one sample per line:
+Real Linux/GPU SFT and GRPO smoke tests, clinical data checks, original experiment
+configuration reconciliation and evaluation repair remain outstanding for a
+verified paper-reproduction release. LICENSE contains the complete standard
+Apache-2.0 text; upstream attribution is recorded in NOTICE. Synthetic tests
+do not establish paper performance, complete runtime correctness, or clinical validity.
 
-```json
-{"image": "IMAGE_PATH_001", "width": 256, "height": 256, "label": "HSIL", "bbox": [120, 95, 220, 210]}
-```
-
-Labels:
-
-```text
-HSIL, ASC-H, LSIL, ASC-US, Normal
-```
-
-## Data Preparation
-
-For the paper experiments, first crop annotated cell regions and resize them to
-`256 x 256`:
-
-```bash
-python3 scripts/prepare_cell_crops.py \
-  --input YOUR_ANNOTATIONS.jsonl \
-  --image-root YOUR_IMAGE_ROOT \
-  --output outputs/DST_cropped.jsonl \
-  --output-image-dir outputs/DST_256 \
-  --split-if-missing
-```
-
-Then build CerviCoT. If you already have rationales in the annotation JSONL,
-use the direct converter:
-
-```bash
-python3 scripts/prepare_cervicot.py \
-  --input YOUR_ANNOTATIONS.jsonl \
-  --output outputs/cervicot.jsonl \
-  --split-if-missing \
-  --test-ratio 0.2
-```
-
-The converted file follows the Ground-R1 JSONL layout:
-
-```text
-image, width, height, input_width, input_height, bboxs, problem, solution, label, split
-```
-
-If you have local PubMed retrieval snippets, use the RAG builder:
-
-```bash
-python3 scripts/build_cervicot_rag.py \
-  --annotations outputs/DST_cropped.jsonl \
-  --knowledge YOUR_PUBMED_KNOWLEDGE.jsonl \
-  --output outputs/cervicot.jsonl
-```
-
-To fetch PubMed snippets into the expected JSONL format:
-
-```bash
-python3 scripts/fetch_pubmed_knowledge.py \
-  --output outputs/pubmed_cervical_knowledge.jsonl \
-  --email YOUR_EMAIL
-```
-
-To use a local generator for CerviCoT rationales:
-
-```bash
-python3 scripts/generate_cervicot_rationales.py \
-  --annotations outputs/DST_cropped.jsonl \
-  --knowledge outputs/pubmed_cervical_knowledge.jsonl \
-  --output outputs/DST_rationales.jsonl \
-  --generator-cmd "python3 /path/to/local_generator.py"
-```
-
-The full reproduction script uses this generation path when
-`CERVICOT_GENERATOR_CMD` is set in the private environment file.
-
-## Visual Operations
-
-```bash
-python3 scripts/make_visual_variants.py \
-  --image IMAGE_PATH \
-  --bbox "[120,95,220,210]" \
-  --output-dir outputs/visual_debug
-```
-
-The command writes a focused crop, an enhanced crop, and an ignored image to
-the output directory.
-
-## SFT
-
-```bash
-export MODEL_NAME_OR_PATH=/path/to/Qwen2.5-VL-7B-Instruct
-export DATASET_JSONL=outputs/cervicot.jsonl
-export OUTPUT_DIR=outputs/sft
-export NPROC_PER_NODE=4
-
-bash scripts/train_sft.sh
-```
-
-## GRPO
-
-```bash
-export MODEL_NAME_OR_PATH=outputs/sft
-export DATASET_JSONL=outputs/cervicot.jsonl
-export OUTPUT_DIR=outputs/grpo
-export NPROC_PER_NODE=4
-
-bash scripts/train_grpo.sh
-```
-
-The GRPO entry uses the paper defaults `G1=4`, `G2=2`, `num_generations=8`,
-and `beta=0`. It patches the Ground-R1 trainer at runtime to run auxiliary
-crop and background forward passes for the full DVHR reward.
-
-## Inference
-
-```bash
-python3 scripts/run_rollout.py \
-  --model /path/to/Qwen2.5-VL-7B-Instruct \
-  --image IMAGE_PATH
-```
-
-Inference does not require labels. When multiple grounding/answering rollouts
-are generated, CerviThink selects the final prediction with a label-free score
-based on output format, valid label extraction, crop/final consistency,
-background normality confirmation, and self-consistency votes across rollouts.
-Use `--label` only for debugging on annotated samples; it enables DVHR scoring
-and should not be used for blind test inference.
-
-## Evaluation
-
-Prediction JSONL files should contain `label` and `prediction`:
-
-```bash
-python3 scripts/evaluate_predictions.py --input YOUR_PREDICTIONS.jsonl
-```
-
-For end-to-end reproduction across DST, ComparisonDetector, and HiCervix, see
-`docs/reproduction.md` and `configs/reproduce_paper.env.example`.
-
-Baseline evaluation and paper-table aggregation are available through:
-
-```bash
-bash scripts/run_hf_baselines.sh
-bash scripts/run_vision_baselines.sh
-python3 scripts/aggregate_experiment_tables.py --manifest YOUR_MANIFEST.json --output-dir outputs/tables
-```
-
-Use `scripts/smoke_training.sh` for a one-step training check before launching
-full SFT/GRPO jobs.
-
-## Tests
-
-```bash
-PYTHONPATH=. python3 -m unittest discover -s tests -v
-python3 scripts/release_check.py
-```
-
-## Citation
-
-If this code is useful for your work, please cite the accompanying paper:
-
-```bibtex
-@inproceedings{cervithink2026,
-  title={CerviThink: A Reinforced Visual Reasoning Framework for Cervical Cancer Cell Classification},
-  author={CerviThink Contributors},
-  booktitle={MICCAI},
-  year={2026}
-}
-```
+This project is a research artifact, not a clinical diagnostic tool.

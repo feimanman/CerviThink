@@ -32,11 +32,16 @@ def main() -> None:
             continue
         width = int(record.get("input_width", record.get("width", 1024)))
         height = int(record.get("input_height", record.get("height", 1024)))
-        prompt = "<image>\n" + sft_prompt(record["problem"], width, height)
+        prompt = "<image>\n" + sft_prompt(
+            record["problem"], width, height, rationale_mode=record.get("rationale_mode", "provided"),
+        )
+        image = Path(record["image"]).expanduser().resolve()
+        if not image.is_file():
+            raise ValueError(f"Missing SFT image: {image}")
         out.append(
             {
                 "id": str(record.get("problem_id", len(out) + 1)),
-                "image": record["image"],
+                "image": str(image),
                 "conversations": [
                     {"from": "human", "value": prompt},
                     {"from": "gpt", "value": record["solution"]},
@@ -44,6 +49,9 @@ def main() -> None:
             }
         )
 
+    if not out:
+        raise ValueError("SFT split is empty")
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(out, handle, ensure_ascii=False, indent=2)
     print(f"Wrote {len(out)} SFT records to {args.output}")

@@ -50,17 +50,45 @@ CerviThink is a research artifact for cervical cytology image classification.
 It is not intended for clinical diagnosis, screening, treatment planning, or
 medical decision-making.
 
-## Release Metadata
+## Source provenance
 
-Before public release, update:
+The runtime training integration targets:
 
 ```text
-CITATION.cff
-README.md citation block
-setup.cfg author field
-LICENSE copyright notice
-NOTICE copyright notice
+https://github.com/zzzhhzzz/Ground-R1
+commit e10eae6890fd2c2be1aec1745c6b49b43ebc753e
 ```
+
+Relevant upstream files include:
+
+- `r1-v/src/open_r1/trainer/grpo_trainer.py`, with the HuggingFace 2025
+  Apache-2.0 notice.
+- `qwen-vl-finetune/qwenvl/train/train_qwen.py`, whose source attributes
+  FastChat and Stanford Alpaca and carries the listed 2023 copyright notice.
+
+The original public adapter incorporated the upstream trainer structure.
+This release replaces that adapter with an explicit CerviThink trajectory and
+uses the upstream class as the training base. The SFT wrapper adapts the upstream
+training sequence. Source headers, NOTICE and CHANGELOG record these adaptations.
+The full upstream source tree is not redistributed in this package.
+
+`LICENSE` is the complete standard text from:
+
+```text
+https://www.apache.org/licenses/LICENSE-2.0.txt
+SHA256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+```
+
+Copyright ownership and any institutional release approvals remain matters for
+the maintainers to confirm. This technical source/license inventory is not an
+institutional authorization or a legal opinion.
+
+## Release Metadata
+
+`CITATION.cff` includes manuscript author/title information and the software alpha
+version. No unverified DOI, proceedings pages or publication date is asserted.
+The software contributor label is retained rather than inventing individual
+copyright ownership.
 
 Run strict metadata checks:
 

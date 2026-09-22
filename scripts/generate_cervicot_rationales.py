@@ -41,6 +41,10 @@ def parse_args() -> argparse.Namespace:
         help="Command that reads prompt from stdin and writes rationale to stdout.",
     )
     parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--generator-argv-json", help="JSON argv array, preferable to shell-style command strings.")
+    parser.add_argument("--generator-input-format", choices=("json", "text"), default="json")
+    parser.add_argument("--generator-id", help="Actual generator model/version for provenance.")
+    parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--fallback-template", action="store_true", help="Use deterministic template if generator is unset.")
     return parser.parse_args()
 
@@ -86,38 +90,67 @@ def build_prompt(record: dict, selected: list[dict]) -> str:
     )
 
 
-def run_generator(command: str, prompt: str) -> str:
+def run_generator(command: str | list[str], prompt: str, timeout: float = 120) -> str:
+    argv = command if isinstance(command, list) else shlex.split(command)
+    if not argv or not all(isinstance(arg, str) for arg in argv):
+        raise ValueError("Generator argv must be a nonempty list of strings")
     completed = subprocess.run(
-        shlex.split(command),
+        argv,
         input=prompt,
         text=True,
         check=True,
         capture_output=True,
+        timeout=timeout,
     )
-    return completed.stdout.strip()
+    rationale = completed.stdout.strip()
+    if not rationale:
+        raise ValueError("Generator returned an empty rationale")
+    return rationale
 
 
 def main() -> None:
     args = parse_args()
     rows = read_jsonl(args.annotations)
     knowledge = read_jsonl(args.knowledge)
-    if not args.generator_cmd and not args.fallback_template:
+    if args.generator_cmd and args.generator_argv_json:
+        raise ValueError("Choose generator-cmd OR generator-argv-json")
+    command = json.loads(args.generator_argv_json) if args.generator_argv_json else args.generator_cmd
+    if command and not args.generator_id:
+        raise ValueError("Record the actual --generator-id/model version")
+    if not command and not args.fallback_template:
         raise SystemExit("Set --generator-cmd or use --fallback-template.")
 
     enriched = []
     for row in rows:
+        if "split" not in row:
+            raise ValueError("Freeze dataset splits before generating rationales")
         label = normalize_label(str(row.get("label", "")))
         selected = select_knowledge(label, knowledge, args.top_k)
         new_row = dict(row)
-        if args.generator_cmd:
+        if row["split"] != "train":
+            for key in ("rationale", "cot", "thought"):
+                new_row.pop(key, None)
+            enriched.append(new_row)
+            continue
+        if command:
             prompt = build_prompt(new_row, selected)
-            new_row["rationale"] = run_generator(args.generator_cmd, prompt)
+            if args.generator_input_format == "json":
+                image = Path(new_row["image"]).expanduser().resolve()
+                if not image.is_file():
+                    raise ValueError(f"Generator image missing: {image}")
+                prompt = json.dumps({
+                    "schema": "cervithink-rationale-v1", "image": str(image),
+                    "label": label, "bbox": new_row.get("bbox"),
+                    "prompt": prompt, "retrieved_knowledge": selected,
+                }, ensure_ascii=False)
+            new_row["rationale"] = run_generator(command, prompt, args.timeout)
         else:
             new_row["rationale"] = template_rationale(new_row, selected)
         new_row["retrieved_knowledge"] = [
             str(item.get("title") or item.get("pmid") or item.get("id") or "")
             for item in selected
         ]
+        new_row["rationale_source"] = args.generator_id or "deterministic-template"
         enriched.append(new_row)
 
     write_jsonl(enriched, args.output)

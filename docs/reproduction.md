@@ -1,214 +1,96 @@
-# Reproducing The Paper Experiments
+# Explicit method experiments (repair branch)
 
-This repository contains the experiment pipeline used by CerviThink:
+The former single-DST-training / 10:90-external-repartition script has been
+replaced. No metrics are automatically calculated in this workflow.
 
-1. Crop annotated cells and resize them to `256 x 256`.
-2. Build CerviCoT JSONL records with retrieval-augmented generated rationales.
-3. Run Qwen2.5-VL SFT with the Ground-R1 finetuning stack.
-4. Run GRPO with `G1=4`, `G2=2`, and `beta=0`.
-5. Evaluate weighted Precision, Recall, and F1 on DST, ComparisonDetector, and HiCervix.
+## Configuration
 
-Private hospital images, downloaded public datasets, and PubMed snippets are not
-included in this repository. Prepare local JSONL files with these fields:
+Copy `configs/method_experiments.json.example` to a private location. Relative
+paths in that JSON resolve against the configuration's directory. Generator
+argv entries should use absolute script/model paths. Keep the configuration and
+outputs private: they can contain clinical paths and original group identifiers.
 
-```json
-{"image": "IMAGE_PATH_001", "label": "HSIL", "bbox": [120, 95, 220, 210]}
-```
+Each dataset needs:
 
-For PubMed knowledge, use JSONL rows such as:
+- Raw rows with image, label, bbox, and one explicitly chosen grouping column.
+- Original `train`/`test` assignments for external datasets. `val` is supported.
+- A complete original-label-to-target-label mapping for external datasets. Null
+  means exclude. Unknown source labels are errors. Normal is never fabricated.
+- `train_fraction=0.1` for external few-shot runs; default DST fraction is 1.
+- HiCervix already-cropped images should use `resize_full_image=true`.
 
-```json
-{"title": "Cervical cytology review", "abstract": "Text used for retrieval.", "label": "HSIL"}
-```
+Only DST may explicitly request a new patient-level split via
+`create_split=true`, `test_ratio=0.2`. An existing split is always validated.
 
-You can create this file with NCBI E-utilities:
+The few-shot sampling unit is a cell sample within the already isolated train
+partition. Stratified quotas total round-half-up(N_train * fraction), with one
+per present class if the budget allows; otherwise preparation stops. Unselected
+train samples are labeled `unused_train`, never moved to test. The manifest
+records realized counts, class supports, seed, and test membership hashes.
 
-```bash
-python3 scripts/fetch_pubmed_knowledge.py \
-  --output outputs/pubmed_cervical_knowledge.jsonl \
-  --retmax 20 \
-  --email YOUR_EMAIL
-```
-
-## One-Command Pipeline
-
-Create a private environment file from `configs/reproduce_paper.env.example`,
-then run:
+## Plan and execute
 
 ```bash
-set -a
-source /path/to/private_reproduce_paper.env
-set +a
-bash scripts/reproduce_paper.sh
+python scripts/run_experiments.py --config /path/to/private_config.json
+python scripts/run_experiments.py --config /path/to/private_config.json --execute --prepare-only
 ```
 
-The script writes cropped datasets, CerviCoT JSONL files, checkpoints,
-predictions, and metric reports under `OUTPUT_ROOT`. Set
-`CERVICOT_GENERATOR_CMD` to use a local rationale generator for the paper-style
-RAG CerviCoT construction. If it is unset, the script uses deterministic
-retrieval-augmented rationale composition; set `CERVICOT_USE_FALLBACK_TEMPLATE=1`
-to run the generator wrapper without an external model.
-
-## Manual Steps
-
-Crop and resize DST or ComparisonDetector cells:
+The first command only prints commands. The second runs data preparation on a
+fresh output root. To run the complete preparation/training plan, use a separate
+fresh output root and run:
 
 ```bash
-python3 scripts/prepare_cell_crops.py \
-  --input YOUR_ANNOTATIONS.jsonl \
-  --image-root YOUR_IMAGE_ROOT \
-  --output outputs/DST_cropped.jsonl \
-  --output-image-dir outputs/DST_256 \
-  --dataset DST \
-  --split-if-missing \
-  --test-ratio 0.2
+python scripts/run_experiments.py --config /path/to/private_training_config.json --execute
 ```
 
-Build CerviCoT with deterministic retrieval-augmented rationale composition:
+Existing nonempty output roots are preserved and rejected, not deleted or
+silently reused. This implementation does not resume partial experiment plans.
+
+The bash compatibility entry accepts the same explicit configuration:
 
 ```bash
-python3 scripts/build_cervicot_rag.py \
-  --annotations outputs/DST_cropped.jsonl \
-  --knowledge YOUR_PUBMED_KNOWLEDGE.jsonl \
-  --output outputs/DST_cervicot.jsonl
+EXPERIMENT_CONFIG=/path/to/private_config.json bash scripts/reproduce_paper.sh
 ```
 
-For the paper-style generation-based CerviCoT variant, first create
-rationale-enriched rows with a local generator command:
+Add `--execute` explicitly to launch work. Old `FEWSHOT_TEST_RATIO=0.9`, global
+`EVAL_MODEL`, and single `TRAIN_DATASET_JSONL` reproduction semantics are retired.
 
-```bash
-python3 scripts/generate_cervicot_rationales.py \
-  --annotations outputs/DST_cropped.jsonl \
-  --knowledge outputs/pubmed_cervical_knowledge.jsonl \
-  --output outputs/DST_rationales.jsonl \
-  --generator-cmd "python3 /path/to/local_generator.py"
-```
+## Experiment matrix
 
-The command in `--generator-cmd` reads the prompt from stdin and writes the
-rationale to stdout. Use `--fallback-template` for a deterministic dry run.
-`scripts/reproduce_paper.sh` takes this path automatically when
-`CERVICOT_GENERATOR_CMD` is set.
+Every `(dataset, rationale_mode)` gets its own prepared CerviCoT and SFT model.
+All reward variants within that activation reuse the exact same SFT checkpoint.
+External datasets get their own SFT+GRPO on their selected train samples; no
+shared DST model is silently substituted for an external adaptation run.
 
-Run SFT and GRPO:
+The current explicit default is independent per-dataset adaptation from the
+configured base Qwen model. Whether the original paper instead initialized
+external adaptation from a DST-trained model remains an author-confirmation
+item; the new default is not evidence of the original protocol.
 
-```bash
-export MODEL_NAME_OR_PATH=/path/to/Qwen2.5-VL-7B-Instruct
-export DATASET_JSONL=outputs/DST_cervicot.jsonl
-export OUTPUT_DIR=outputs/sft
-bash scripts/train_sft.sh
+Supported rationale modes:
 
-export MODEL_NAME_OR_PATH=outputs/sft
-export OUTPUT_DIR=outputs/grpo
-bash scripts/train_grpo.sh
-```
+- `none`: no reasoning text in the target or SFT prompt; box and answer retained.
+- `provided`: requires nonempty supplied training rationale. Use for audited
+  manual rationales or actual precomputed rationales, and identify their origin.
+- `rag`: requires real local generator argv, model/version, and frozen literature.
+- `template`: explicitly named deterministic baseline, not a silent RAG substitute.
 
-Evaluate:
+RAG only generates on selected training rows. The generator receives JSON stdin
+containing `schema`, an absolute `image` path, label, bbox, prompt, and retrieved
+literature; it writes plain rationale text to stdout. The generator must actually
+open/use the image if the experiment claims visually conditioned explanations.
+Providing an image path alone does not prove visual grounding. The repository
+does not invent a generator model, clinical rationales, or original retrieval
+snapshot. Empty output and timeout are failures.
 
-```bash
-python3 scripts/evaluate_dataset.py \
-  --model outputs/grpo \
-  --input outputs/DST_cervicot.jsonl \
-  --output outputs/DST_predictions.jsonl \
-  --report-output outputs/DST_metrics.json
-```
+## Recording and verification
 
-Summarize reports:
+The plan writes `execution_manifest.json`. Training writes per-run manifests;
+split membership and source/configuration hashes are recorded. Full test and
+unused-train rows never enter SFT/GRPO training. No test-based model selection is
+implemented. Use `predict_method.py` to collect seeded predictions without metrics.
 
-```bash
-python3 scripts/summarize_metrics.py outputs/*_metrics.json
-```
-
-Check the training environment before launching long jobs:
-
-```bash
-python3 scripts/check_training_environment.py \
-  --dataset-jsonl outputs/DST_cervicot.jsonl \
-  --model /path/to/Qwen2.5-VL-7B-Instruct
-```
-
-Run a one-step SFT/GRPO smoke test:
-
-```bash
-export MODEL_NAME_OR_PATH=/path/to/Qwen2.5-VL-7B-Instruct
-export DATASET_JSONL=outputs/DST_cervicot.jsonl
-bash scripts/smoke_training.sh
-```
-
-Run Hugging Face baselines:
-
-```bash
-export BASELINE_CONFIG=/path/to/baselines.json
-export DATASET_JSONL=outputs/DST_cervicot.jsonl
-export OUTPUT_DIR=outputs/baselines/DST
-bash scripts/run_hf_baselines.sh
-```
-
-Run vision-only baselines:
-
-```bash
-export BASELINE_CONFIG=configs/vision_baselines.json.example
-export DATASET_JSONL=outputs/DST_cervicot.jsonl
-export OUTPUT_DIR=outputs/vision_baselines/DST
-bash scripts/run_vision_baselines.sh
-```
-
-For baselines that require external services or separate upstream code, such as
-Gemini-2.5 or the original ComparisonDetector model, export their predictions as
-JSONL with `label` and `prediction`, then run `scripts/evaluate_predictions.py`
-and add the metric JSON to the experiment manifest.
-
-Aggregate paper tables:
-
-```bash
-python3 scripts/aggregate_experiment_tables.py \
-  --manifest /path/to/experiment_manifest.json \
-  --output-dir outputs/tables
-```
-
-## Paper Settings
-
-The default scripts use the paper settings:
-
-```text
-Backbone: Qwen2.5-VL-7B
-Image size: 256 x 256
-DST train/test split: 4:1
-ComparisonDetector/HiCervix training split: 10% few-shot
-SFT learning rate: 1e-6
-GRPO learning rate: 5e-7
-SFT effective batch size: 8
-GRPO effective batch size: 4
-Training hardware: 4 x NVIDIA A100
-DeepSpeed: ZeRO-2
-Grounding rollouts: G1=4
-Answer rollouts: G2=2
-GRPO generations: 8
-KL beta: 0
-DVHR auxiliary forward: enabled
-Transform scale: uniform [1, 3]
-Transform contrast: uniform [0.8, 1.5]
-Ignore inpainting: OpenCV Navier-Stokes, radius 5
-Metrics: weighted Precision, weighted Recall, weighted F1
-Labels: HSIL, ASC-H, LSIL, ASC-US, Normal
-```
-
-## Ablations
-
-Reward ablations can be launched by overriding `reward_funcs`:
-
-```bash
-bash scripts/train_grpo.sh --reward_funcs accuracy format --enable_dvhr_auxiliary false
-bash scripts/train_grpo.sh --reward_funcs accuracy format consistency
-bash scripts/train_grpo.sh --reward_funcs accuracy format background
-bash scripts/train_grpo.sh --reward_funcs accuracy format consistency background
-```
-
-CerviCoT ablations use the same training commands with different SFT JSONL
-files:
-
-```text
-Without CerviCoT: omit rationale/cot/thought fields before conversion.
-Partial CerviCoT: provide manual rationale fields.
-CerviThink: generate rationales with scripts/generate_cervicot_rationales.py
-and convert them with scripts/build_cervicot_rag.py.
-```
+`--prepare-only` and CPU unit tests do not validate real-model training. Run
+`smoke_training.sh` in the pinned Linux/GPU environment before long jobs. Then
+verify a saved checkpoint can be loaded for prediction. Reconcile against the
+original experiment records before claiming paper reproduction.

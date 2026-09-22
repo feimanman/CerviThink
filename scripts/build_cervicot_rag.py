@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-if-missing", action="store_true")
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--allow-template", action="store_true",
+                        help="Explicit template baseline only, not the generated-rationale experiment.")
     return parser.parse_args()
 
 
@@ -109,7 +111,12 @@ def main() -> None:
     enriched = []
     for row in annotations:
         new_row = dict(row)
+        if new_row.get("split", "train") != "train":
+            enriched.append(new_row)
+            continue
         if not new_row.get("rationale") and not new_row.get("cot") and not new_row.get("thought"):
+            if not args.allow_template:
+                raise ValueError("Missing generated rationale; use the generator or explicitly --allow-template")
             retrieved = rank_knowledge(new_row, knowledge, args.top_k)
             new_row["rationale"] = compose_rationale(new_row, retrieved)
             new_row["retrieved_knowledge"] = [

@@ -1,8 +1,26 @@
 cff-version: 1.2.0
 title: "CerviThink: A Reinforced Visual Reasoning Framework for Cervical Cancer Cell Classification"
-message: "If you use this software, please cite the accompanying paper."
+message: "Cite the software version and, when discussing the method, the associated paper."
 type: software
 authors:
   - name: "CerviThink Contributors"
 year: 2026
 license: Apache-2.0
+version: 0.2.0-alpha.1
+repository-code: "https://github.com/feimanman/CerviThink"
+preferred-citation:
+  type: generic
+  title: "CerviThink: A Reinforced Visual Reasoning Framework for Cervical Cancer Cell Classification"
+  authors:
+    - family-names: Fei
+      given-names: Manman
+    - family-names: Jiang
+      given-names: Haotian
+    - family-names: Yi
+      given-names: Zhenyu
+    - family-names: Wang
+      given-names: Qian
+    - family-names: Zhang
+      given-names: Lichi
+  year: 2026
+  notes: "Author/title metadata follows the supplied manuscript. Publication identifiers are not asserted here."

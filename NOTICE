@@ -1,8 +1,21 @@
 CerviThink
 Copyright 2026 CerviThink Contributors
 
-This project includes training wrappers designed to interoperate with Ground-R1.
-Ground-R1 is distributed under the Apache License 2.0.
+Training integration and adaptations:
+
+- Ground-R1, zzzhhzzz/Ground-R1, integration target commit
+  e10eae6890fd2c2be1aec1745c6b49b43ebc753e.
+  The GRPO trainer used by this project derives from the HuggingFace training
+  stack. Its source notice is: Copyright 2025 The HuggingFace Team.
+  All rights reserved. Licensed under the Apache License, Version 2.0.
+- The SFT training sequence is adapted from Ground-R1's qwen-vl-finetune,
+  whose source attributes FastChat and Stanford Alpaca:
+  Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois,
+  Xuechen Li. Licensed under the Apache License, Version 2.0.
+
+Modified files are identified in CHANGELOG.md and source headers. The upstream
+Ground-R1 tree is not bundled. See docs/third_party.md for the source locations.
+This notice preserves upstream attributions; it does not change LICENSE terms.
 
 This repository does not redistribute third-party model weights, medical images,
 or private clinical annotations. Users are responsible for complying with the

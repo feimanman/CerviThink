@@ -7,6 +7,6 @@ Pillow>=10.0.0
 sentencepiece>=0.1.99
 torch>=2.5.1
 torchvision>=0.20.0
-transformers
+transformers==4.51.3
 trl==0.14.0
 wandb>=0.19.1

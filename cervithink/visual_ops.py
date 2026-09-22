@@ -23,6 +23,8 @@ class VisualVariants:
     transform: Image.Image
     ignore: Image.Image
     bbox: BBox
+    zoom: float = 1.0
+    contrast: float = 1.0
 
 
 def load_image(image: str | Path | Image.Image) -> Image.Image:
@@ -88,14 +90,14 @@ def transform_operation(
     bbox: Optional[tuple[float, float, float, float]] = None,
     zoom: float = 2.0,
     contrast: float = 1.25,
-    sharpness: float = 1.15,
+    sharpness: float = 1.0,
     output_size: Optional[tuple[int, int]] = None,
 ) -> Image.Image:
     """Zoom and enhance a crop to mimic microscope magnification."""
 
     img = load_image(image)
     if bbox is not None:
-        img = focus_operation(img, bbox, context_scale=max(1.0, zoom))
+        img = focus_operation(img, bbox, context_scale=1.0)
 
     if output_size is None:
         output_size = (max(28, int(img.width * zoom)), max(28, int(img.height * zoom)))
@@ -144,6 +146,7 @@ def ignore_operation(
     inpaint_radius: int = DEFAULT_INPAINT_RADIUS,
     blur_radius: float = 12.0,
     prefer_opencv: bool = True,
+    require_opencv: bool = False,
 ) -> Image.Image:
     """Mask suspected abnormal cells and reconstruct the area."""
 
@@ -154,6 +157,8 @@ def ignore_operation(
         inpainted = _opencv_inpaint(img, box, radius=inpaint_radius)
         if inpainted is not None:
             return inpainted
+    if require_opencv:
+        raise RuntimeError("Paper workflow requires OpenCV NS inpainting; blur fallback is disabled")
     return _pil_ignore(img, box, blur_radius=blur_radius)
 
 
@@ -164,6 +169,7 @@ def make_visual_variants(
     transform_zoom: float | None = None,
     transform_contrast: float | None = None,
     rng: random.Random | None = None,
+    require_opencv: bool = True,
 ) -> VisualVariants:
     img = load_image(image)
     box = clamp_bbox(bbox, img.width, img.height, min_size=28)
@@ -174,9 +180,10 @@ def make_visual_variants(
         if transform_contrast is None:
             transform_contrast = sampled_contrast
     focus = focus_operation(img, box, context_scale=focus_context_scale)
-    transformed = transform_operation(img, box, zoom=transform_zoom, contrast=transform_contrast)
-    ignored = ignore_operation(img, box)
-    return VisualVariants(focus=focus, transform=transformed, ignore=ignored, bbox=box)
+    transformed = transform_operation(focus, zoom=transform_zoom, contrast=transform_contrast)
+    ignored = ignore_operation(img, box, require_opencv=require_opencv)
+    return VisualVariants(focus=focus, transform=transformed, ignore=ignored, bbox=box,
+                          zoom=transform_zoom, contrast=transform_contrast)
 
 
 def save_variants(variants: VisualVariants, output_dir: str | Path, prefix: str = "sample") -> dict[str, str]:
